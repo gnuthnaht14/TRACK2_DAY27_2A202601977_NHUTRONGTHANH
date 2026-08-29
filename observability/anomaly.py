@@ -191,6 +191,32 @@ def detect_anomaly(
         mad_res = mad_detector(current, eval_history, threshold=3.5 if threshold == 3.0 else threshold)
         z_res = zscore_detector(current, eval_history, threshold=threshold)
 
+        # Check if history is too short for valid statistical inference
+        mad_insufficient = "insufficient_history" in mad_res.get("reason", "")
+        z_insufficient = "insufficient_history" in z_res.get("reason", "")
+
+        # If BOTH methods report insufficient history, fall back to relative difference
+        if mad_insufficient and z_insufficient:
+            cur_val = float(current)
+            if eval_history.size == 0:
+                return {
+                    "is_anomaly": False,
+                    "score": 0.0,
+                    "method": "auto",
+                    "reason": "no_history_data",
+                }
+            # Use relative difference as fallback for small history
+            hist_median = float(np.median(eval_history))
+            rel_diff = abs(cur_val - hist_median) / (abs(hist_median) + 1e-6)
+            score = rel_diff * 10.0  # Scale to roughly match z-score range
+            is_anomaly = bool(rel_diff > 0.15)  # >15% deviation is anomalous
+            return {
+                "is_anomaly": is_anomaly,
+                "score": float(score),
+                "method": "auto",
+                "reason": f"small_history_rel_diff: rel_diff={rel_diff:.3f}, threshold=0.15",
+            }
+
         # Primary decision: MAD is more robust against contamination
         # If MAD says True, or if both Z and MAD indicate anomaly
         is_anomaly = mad_res["is_anomaly"] or (z_res["is_anomaly"] and mad_res["score"] > 2.0)

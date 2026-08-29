@@ -83,11 +83,14 @@ def detect_distribution_shift(
 
     # 1. Two-sample KS test statistic
     ks_stat = _two_sample_ks_statistic(cur, base)
-    
+
     # Adaptive KS critical threshold for sample size
+    # Use max(ks_threshold, ks_critical): the larger value is the more conservative threshold
+    # For small samples, ks_critical can exceed 1.0 (clamp to 1.0)
+    # For large samples, ks_critical < ks_threshold, so we use the larger fixed threshold
     if n_cur >= 3 and n_base >= 3:
-        ks_critical = 1.36 * np.sqrt((n_cur + n_base) / (n_cur * n_base))
-        ks_drift = bool(ks_stat >= min(ks_threshold, float(ks_critical)))
+        ks_critical = min(1.0, 1.36 * np.sqrt((n_cur + n_base) / (n_cur * n_base)))
+        ks_drift = bool(ks_stat >= max(ks_threshold, float(ks_critical)))
     else:
         ks_drift = bool(ks_stat >= ks_threshold)
 
