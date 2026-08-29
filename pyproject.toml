@@ -1,0 +1,27 @@
+[project]
+name = "track2-day27-2a202601977-nhutrongthanh"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "gnuthnaht14", email = "thanhnhutrong@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "dbt-core>=1.9,<2",
+    "dbt-duckdb>=1.9,<2",
+    "duckdb>=1.2,<2",
+    "great-expectations==1.21.0",
+    "numpy>=2.0,<3",
+    "pandas>=2.2,<3",
+    "pytest>=8,<10",
+    "pyyaml>=6,<7",
+    "streamlit>=1.40,<2",
+]
+
+[project.scripts]
+track2-day27-2a202601977-nhutrongthanh = "track2_day27_2a202601977_nhutrongthanh:main"
+
+[build-system]
+requires = ["uv_build>=0.12.2,<0.13.0"]
+build-backend = "uv_build"

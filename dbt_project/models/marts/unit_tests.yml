@@ -1,0 +1,31 @@
+unit_tests:
+  - name: test_completed_orders_sum_to_expected_revenue
+    model: fct_daily_revenue
+    description: "Verify completed orders correctly aggregate to expected revenue for active customers"
+    given:
+      - input: ref('stg_orders')
+        rows:
+          - {order_id: 1, customer_id: C0001, amount_usd: 100.0, status: completed, order_date: '2026-08-01'}
+          - {order_id: 2, customer_id: C0001, amount_usd: 70.0, status: completed, order_date: '2026-08-01'}
+      - input: ref('stg_customers')
+        rows:
+          - {customer_id: C0001, is_active: true}
+    expect:
+      rows:
+        - {order_date: '2026-08-01', completed_order_rows: 2, daily_revenue: 170.0}
+
+  - name: test_duplicate_active_customer_inflates_revenue_warning
+    model: fct_daily_revenue
+    description: "Exposes revenue inflation when customer dimension contains duplicate active records for the same customer"
+    given:
+      - input: ref('stg_orders')
+        rows:
+          - {order_id: 1, customer_id: C0001, amount_usd: 100.0, status: completed, order_date: '2026-08-01'}
+      - input: ref('stg_customers')
+        rows:
+          - {customer_id: C0001, is_active: true}
+          - {customer_id: C0001, is_active: true}
+    expect:
+      rows:
+        # If the join is not deduplicated, 1 order joins with 2 customer rows -> 2 rows counted, revenue = 200
+        - {order_date: '2026-08-01', completed_order_rows: 2, daily_revenue: 200.0}
