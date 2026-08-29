@@ -32,7 +32,7 @@ def detect_distribution_shift(
     current_values: Iterable[float],
     baseline_values: Iterable[float],
     *,
-    ks_threshold: float = 0.15,
+    ks_threshold: float = 0.10,
     ratio_threshold: float = 2.5,
 ) -> dict[str, Any]:
     """Detect distribution drift between current and baseline value distributions.
