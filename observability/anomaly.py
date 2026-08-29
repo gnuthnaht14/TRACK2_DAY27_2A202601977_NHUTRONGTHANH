@@ -1,9 +1,10 @@
 """Anomaly detection engine supporting Z-score, robust MAD, and context-aware auto mode.
 
 Features:
-- Z-score baseline for normally distributed metrics.
-- Robust MAD (Median Absolute Deviation) handling zero-MAD edge cases.
-- Context-aware auto mode supporting seasonality (e.g., day_of_week), segment histories, trend, and known events.
+- Z-score baseline for normally distributed metrics with relative tolerance on zero-std.
+- Robust MAD (Median Absolute Deviation) handling zero-MAD and identical history edge cases.
+- Context-aware auto mode supporting automatic weekly seasonality extraction,
+  segment histories, trend differencing, rate spikes, and known events.
 """
 from __future__ import annotations
 
@@ -15,6 +16,8 @@ import numpy as np
 def _clean_numeric_array(values: Iterable[float]) -> np.ndarray:
     """Safely convert any iterable to a 1D clean float numpy array."""
     try:
+        if isinstance(values, (int, float, np.number)):
+            return np.array([float(values)])
         arr = np.asarray(list(values), dtype=float).ravel()
         return arr[np.isfinite(arr)]
     except Exception:
@@ -22,7 +25,7 @@ def _clean_numeric_array(values: Iterable[float]) -> np.ndarray:
 
 
 def zscore_detector(current: float, history: Iterable[float], threshold: float = 3.0) -> dict[str, Any]:
-    """Z-score based anomaly detector."""
+    """Z-score based anomaly detector with zero-std relative tolerance."""
     values = _clean_numeric_array(history)
     if values.size < 3:
         return {"is_anomaly": False, "score": 0.0, "method": "zscore", "reason": "insufficient_history"}
@@ -34,17 +37,25 @@ def zscore_detector(current: float, history: Iterable[float], threshold: float =
     if std == 0:
         if cur == mean:
             score = 0.0
+            reason = f"mean={mean:.3f}, std=0.000, identical_match"
         else:
-            score = float("inf")
+            rel_diff = abs(cur - mean) / (abs(mean) + 1e-6)
+            if rel_diff <= 0.15:  # Up to 15% fluctuation is not an infinite anomaly
+                score = rel_diff * 10.0
+                reason = f"mean={mean:.3f}, zero_std_small_rel_diff={rel_diff:.3f}"
+            else:
+                score = float("inf")
+                reason = f"mean={mean:.3f}, zero_std_large_rel_diff={rel_diff:.3f}"
     else:
         score = abs(cur - mean) / std
+        reason = f"mean={mean:.3f}, std={std:.3f}, threshold={threshold}"
 
     is_anomaly = bool(score > threshold)
     return {
         "is_anomaly": is_anomaly,
         "score": float(score),
         "method": "zscore",
-        "reason": f"mean={mean:.3f}, std={std:.3f}, threshold={threshold}",
+        "reason": reason,
     }
 
 
@@ -60,7 +71,7 @@ def mad_detector(current: float, history: Iterable[float], threshold: float = 3.
     mad = float(np.median(diffs))
 
     if mad == 0:
-        # Zero-MAD edge case (when >50% of history items equal median)
+        # Zero-MAD edge case (when >=50% of history items equal median)
         mean_ad = float(np.mean(diffs))
         if mean_ad > 0:
             modified_z = 0.6745 * abs(cur - median) / mean_ad
@@ -72,8 +83,12 @@ def mad_detector(current: float, history: Iterable[float], threshold: float = 3.
                 reason = f"identical_history_matches: median={median:.3f}"
             else:
                 rel_diff = abs(cur - median) / (abs(median) + 1e-6)
-                modified_z = float("inf") if rel_diff > 0.1 else (rel_diff * 10.0)
-                reason = f"identical_history_drift: median={median:.3f}, rel_diff={rel_diff:.3f}"
+                if rel_diff <= 0.15:
+                    modified_z = rel_diff * 10.0
+                    reason = f"identical_history_minor_diff: median={median:.3f}, rel_diff={rel_diff:.3f}"
+                else:
+                    modified_z = float("inf") if rel_diff > 0.5 else (rel_diff * 20.0)
+                    reason = f"identical_history_drift: median={median:.3f}, rel_diff={rel_diff:.3f}"
     else:
         modified_z = 0.6745 * abs(cur - median) / mad
         reason = f"median={median:.3f}, mad={mad:.3f}, threshold={threshold}"
@@ -99,7 +114,7 @@ def detect_anomaly(
     if method == "zscore":
         return zscore_detector(current, history, threshold=threshold)
     if method == "mad":
-        return mad_detector(current, history, threshold=3.5 if threshold == 3.0 else threshold)
+        return mad_detector(current, history, threshold=threshold if threshold != 3.0 else 3.5)
 
     if method == "auto":
         eval_history = _clean_numeric_array(history)
@@ -115,11 +130,11 @@ def detect_anomaly(
                         return {
                             "is_anomaly": False,
                             "score": 0.0,
-                            "method": "auto:known_event",
+                            "method": "auto",
                             "reason": f"expected_volume_surge_during_known_event: {known_event}",
                         }
 
-            # 2. Segment-specific History (e.g. Same Day of Week)
+            # 2. Segment-specific History provided directly
             same_segment = context.get("same_segment_history")
             if same_segment:
                 cleaned_segment = _clean_numeric_array(same_segment)
@@ -127,26 +142,58 @@ def detect_anomaly(
                     eval_history = cleaned_segment
                     context_notes.append("used_same_segment_history")
 
-            if "day_of_week" in context:
+            # 3. Automatic Day of Week Seasonality Extraction from Full History
+            elif "day_of_week" in context and eval_history.size >= 14:
+                try:
+                    target_dow = int(context["day_of_week"])
+                    dow_indices = [i for i in range(eval_history.size) if (i % 7) == (target_dow % 7)]
+                    if len(dow_indices) >= 2:
+                        dow_segment = eval_history[dow_indices]
+                        eval_history = dow_segment
+                        context_notes.append(f"auto_extracted_dow_{target_dow}_segment(n={len(dow_indices)})")
+                except Exception:
+                    pass
+
+            if "day_of_week" in context and "auto_extracted_dow" not in " ".join(context_notes):
                 context_notes.append(f"dow={context['day_of_week']}")
+
             if "metric_name" in context:
                 metric_name = context["metric_name"]
                 context_notes.append(f"metric={metric_name}")
-                # Rate-based metrics (e.g. null_rate, error_rate)
                 if "rate" in str(metric_name).lower() and float(current) > 0.05:
                     if eval_history.size > 0 and float(np.mean(eval_history)) < 0.01:
                         return {
                             "is_anomaly": True,
                             "score": float(current) / (float(np.mean(eval_history)) + 1e-5),
-                            "method": "auto:rate_spike",
+                            "method": "auto",
                             "reason": f"rate_metric_spike: current={float(current):.4f} > baseline={float(np.mean(eval_history)):.4f}",
                         }
 
-        # 3. Combined evaluation: Robust MAD + Z-score
-        mad_res = mad_detector(current, eval_history, threshold=3.5)
+            # 4. Trend context handling (linear growth)
+            if context.get("trend") == "linear" and eval_history.size >= 4:
+                diffs = np.diff(eval_history)
+                expected_next = float(eval_history[-1]) + float(np.median(diffs))
+                trend_diff = abs(float(current) - expected_next)
+                mad_diff = float(np.median(np.abs(diffs - np.median(diffs))))
+                if mad_diff > 0:
+                    trend_score = 0.6745 * trend_diff / mad_diff
+                else:
+                    trend_score = trend_diff / (abs(expected_next) + 1e-5)
+                if trend_score <= threshold:
+                    return {
+                        "is_anomaly": False,
+                        "score": float(trend_score),
+                        "method": "auto",
+                        "reason": f"matches_linear_trend: expected={expected_next:.2f}, actual={float(current):.2f}",
+                    }
+
+        # 5. Robust evaluation using MAD as primary with Z-score fallback
+        mad_res = mad_detector(current, eval_history, threshold=3.5 if threshold == 3.0 else threshold)
         z_res = zscore_detector(current, eval_history, threshold=threshold)
 
-        is_anomaly = mad_res["is_anomaly"] or z_res["is_anomaly"]
+        # Primary decision: MAD is more robust against contamination
+        # If MAD says True, or if both Z and MAD indicate anomaly
+        is_anomaly = mad_res["is_anomaly"] or (z_res["is_anomaly"] and mad_res["score"] > 2.0)
         primary_score = mad_res["score"] if np.isfinite(mad_res["score"]) else z_res["score"]
 
         reason = f"auto: z_score={z_res['score']:.2f}, mad_score={mad_res['score']:.2f}"

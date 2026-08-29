@@ -53,7 +53,6 @@ def test_direct_dict_contract_validation():
 
 
 def test_freshness_violation_in_contracts():
-    # 2 hours old data against a 30-minute max delay
     old_time = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
     df = pd.DataFrame([
         {
@@ -82,51 +81,53 @@ def test_determine_action_policy():
 
 
 def test_mad_zero_mad_edge_case():
-    # Over 50% identical values causing MAD = 0
     history = [100.0, 100.0, 100.0, 100.0, 105.0, 95.0]
-    # Extreme outlier
     result = detect_metric(500.0, history, method="mad")
     assert result["is_anomaly"] is True
 
-    # Normal value matching median
     result_normal = detect_metric(100.0, history, method="mad")
     assert result_normal["is_anomaly"] is False
 
 
-def test_context_aware_auto_anomaly_detection():
-    general_history = [1000, 1050, 980, 1020, 1010]
-    saturday_history = [300, 310, 295, 305, 302]
-
-    # Without context, 300 looks like an anomaly against general_history (1000)
-    # But WITH same_segment_history, 305 is completely normal on Saturday
-    result_with_context = detect_metric(
-        305,
-        general_history,
-        method="auto",
-        context={"day_of_week": 5, "same_segment_history": saturday_history},
-    )
-    assert result_with_context["is_anomaly"] is False
+def test_context_aware_auto_anomaly_detection_with_full_history():
+    # 4 weeks (28 days) of data: Weekdays ~600, Weekends ~250
+    # Day order: 0, 1, 2, 3, 4, 5 (Sat), 6 (Sun)
+    weekly_pattern = [600, 620, 590, 610, 630, 250, 260] * 4
+    
+    # Today is Saturday (dow=5), volume = 255.
+    # Without automatic DOW extraction, 255 against full history (mean ~500) would be a false alarm.
+    # With automatic weekly seasonality extraction, 255 against Saturday segment (250) is NORMAL.
+    result = detect_metric(255, weekly_pattern, method="auto", context={"day_of_week": 5})
+    assert result["is_anomaly"] is False
 
 
 def test_known_event_surge_handling():
     history = [100, 105, 98, 102, 101]
-    # Volume surge during a known flash sale event should not trigger critical anomaly
     result = detect_metric(
         220,
         history,
         method="auto",
         context={"known_event": "flash_sale"},
     )
-    assert result["score"] <= 6.0
+    assert result["is_anomaly"] is False
 
 
-def test_ks_distribution_shift():
-    baseline_dist = np.random.normal(loc=50.0, scale=5.0, size=100)
-    shifted_dist = np.random.normal(loc=150.0, scale=5.0, size=100)
+def test_ks_distribution_shift_moderate_mean_drift():
+    # Mean shift of 3 sigma where mean_ratio is only 1.25 (100 -> 125 with std=5)
+    rng = np.random.default_rng(123)
+    base = rng.normal(loc=100.0, scale=5.0, size=50).tolist()
+    cur = rng.normal(loc=125.0, scale=5.0, size=50).tolist()
 
-    result = detect_distribution(shifted_dist, baseline_dist)
+    result = detect_distribution(cur, base)
     assert result["is_anomaly"] is True
-    assert result["method"] == "ks_distribution_test"
+
+
+def test_ks_distribution_shift_small_sample():
+    # Small sample size (3 elements) with significant shift
+    base = [10.0, 10.2, 9.8, 10.1, 9.9]
+    cur = [25.0, 26.0, 24.5]
+    result = detect_distribution(cur, base)
+    assert result["is_anomaly"] is True
 
 
 def test_transitive_column_lineage():
@@ -145,7 +146,6 @@ def test_transitive_column_lineage():
 
 
 def test_cycle_lineage_graph_safety():
-    # Graph containing cycles A -> B -> C -> A
     cycle_graph = {
         "A": ["B"],
         "B": ["C"],
@@ -153,28 +153,24 @@ def test_cycle_lineage_graph_safety():
     }
     assets = downstream_assets(cycle_graph, "A")
     assert "B" in assets and "C" in assets and "D" in assets
-    assert len(assets) == 3  # Visited each unique downstream node once without infinite loop
+    assert len(assets) == 3
 
 
 def test_slo_percentage_normalization():
-    # Target passed as percentage 99.5 instead of 0.995
     res = slo_status(99.5, bad_events=1, total_events=1000)
     assert res["target"] == pytest.approx(0.995)
     assert res["allowed_bad_rate"] == pytest.approx(0.005)
 
 
 def test_multiwindow_burn_rate_policies():
-    # 1. Sustained Fast Burn -> Must PAGE
     fast_burn = multiwindow_burn(short_window_burn=15.0, long_window_burn=15.0)
     assert fast_burn["page"] is True
     assert fast_burn["severity"] == "critical"
 
-    # 2. Transient Spike (short elevated, long low) -> Do NOT Page, Warn
     transient = multiwindow_burn(short_window_burn=15.0, long_window_burn=1.0)
     assert transient["page"] is False
     assert transient["severity"] == "warning"
 
-    # 3. Healthy / Low Burn -> Info
     healthy = multiwindow_burn(short_window_burn=0.8, long_window_burn=0.9)
     assert healthy["page"] is False
     assert healthy["severity"] == "info"
@@ -182,7 +178,6 @@ def test_multiwindow_burn_rate_policies():
 
 def test_rag_embedding_norm_drift():
     baseline_norms = [1.0, 1.02, 0.98, 1.01, 0.99, 1.0, 1.01]
-    # Collapse in vector norms
     drifted_norms = [0.1, 0.12, 0.09, 0.11]
     res = rag_embedding_shift(drifted_norms, baseline_norms)
     assert res["is_anomaly"] is True

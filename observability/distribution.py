@@ -1,5 +1,5 @@
 """Distribution drift detector using Two-Sample Kolmogorov-Smirnov (KS) statistic,
-Quantile shift, and robust variance/mean ratio metrics.
+Welch's t-score mean deviation, and robust variance/mean ratio metrics.
 """
 from __future__ import annotations
 
@@ -32,10 +32,17 @@ def detect_distribution_shift(
     current_values: Iterable[float],
     baseline_values: Iterable[float],
     *,
-    ks_threshold: float = 0.35,
-    ratio_threshold: float = 3.0,
+    ks_threshold: float = 0.30,
+    ratio_threshold: float = 2.5,
 ) -> dict[str, Any]:
-    """Detect distribution shift between current and baseline value distributions."""
+    """Detect distribution drift between current and baseline value distributions.
+
+    Combines:
+    1. Two-Sample Kolmogorov-Smirnov (KS) test for distribution shape / CDF shift.
+    2. Standardized Mean Difference (Welch's z-score of means).
+    3. Mean Ratio check.
+    4. Variance / Spread ratio check.
+    """
     try:
         cur = np.asarray(list(current_values), dtype=float).ravel()
         base = np.asarray(list(baseline_values), dtype=float).ravel()
@@ -49,7 +56,10 @@ def detect_distribution_shift(
             "reason": "invalid_input_data",
         }
 
-    if cur.size == 0 or base.size == 0:
+    n_cur = cur.size
+    n_base = base.size
+
+    if n_cur == 0 or n_base == 0:
         return {
             "is_anomaly": False,
             "score": 0.0,
@@ -57,30 +67,63 @@ def detect_distribution_shift(
             "reason": "empty_input",
         }
 
-    # 1. Two-sample KS test statistic
-    ks_stat = _two_sample_ks_statistic(cur, base)
+    # Identical samples check
+    if n_cur == n_base and np.array_equal(cur, base):
+        return {
+            "is_anomaly": False,
+            "score": 0.0,
+            "method": "ks_distribution_test",
+            "reason": "identical_samples",
+        }
 
-    # 2. Mean ratio check
     cur_mean = float(np.mean(cur))
     base_mean = float(np.mean(base))
-    if base_mean == 0:
-        mean_ratio = float("inf") if cur_mean != 0 else 1.0
-    else:
-        mean_ratio = max(abs(cur_mean / base_mean), abs(base_mean / cur_mean)) if cur_mean != 0 else float("inf")
+    cur_std = float(np.std(cur, ddof=1)) if n_cur > 1 else float(np.std(cur))
+    base_std = float(np.std(base, ddof=1)) if n_base > 1 else float(np.std(base))
 
-    # 3. Variance / Spread ratio check
-    cur_std = float(np.std(cur))
-    base_std = float(np.std(base))
-    if base_std > 0 and cur_std > 0:
+    # 1. Two-sample KS test statistic
+    ks_stat = _two_sample_ks_statistic(cur, base)
+    
+    # Adaptive KS critical threshold for sample size
+    if n_cur >= 3 and n_base >= 3:
+        ks_critical = 1.36 * np.sqrt((n_cur + n_base) / (n_cur * n_base))
+        ks_drift = bool(ks_stat >= min(ks_threshold, float(ks_critical)))
+    else:
+        ks_drift = bool(ks_stat >= ks_threshold)
+
+    # 2. Standardized Mean Difference (Z-score / Welch's t of means)
+    diff_mean = abs(cur_mean - base_mean)
+    if base_std > 0:
+        mean_std_shift = diff_mean / base_std
+    else:
+        mean_std_shift = float("inf") if diff_mean > 0 else 0.0
+
+    se_mean = np.sqrt((cur_std ** 2 / max(1, n_cur)) + (base_std ** 2 / max(1, n_base)))
+    t_stat = diff_mean / se_mean if se_mean > 0 else (float("inf") if diff_mean > 0 else 0.0)
+
+    # 3. Mean ratio check
+    if abs(base_mean) > 1e-6:
+        mean_ratio = max(abs(cur_mean / base_mean), abs(base_mean / cur_mean)) if abs(cur_mean) > 1e-6 else float("inf")
+    else:
+        mean_ratio = float("inf") if abs(cur_mean) > 1e-3 else 1.0
+
+    # 4. Variance / Spread ratio check
+    if base_std > 1e-6 and cur_std > 1e-6:
         std_ratio = max(cur_std / base_std, base_std / cur_std)
     else:
-        std_ratio = 1.0
+        std_ratio = float("inf") if (cur_std > 1e-3 or base_std > 1e-3) else 1.0
 
-    # Anomaly condition: Significant KS distribution shift OR extreme mean shift OR extreme variance shift
+    # Anomaly conditions:
+    # A. KS test indicates significant cumulative distribution difference
+    # B. Mean difference exceeds 3 sigma (mean_std_shift >= 3.0 or t_stat >= 3.0)
+    # C. Extreme mean ratio (>= 2.5)
+    # D. Extreme variance ratio (>= 4.0 for moderate samples)
     is_anomaly = bool(
-        (ks_stat >= ks_threshold and (cur.size >= 4 and base.size >= 4))
+        ks_drift
+        or (mean_std_shift >= 3.0 and n_base >= 3)
+        or (t_stat >= 3.0 and (n_cur >= 3 and n_base >= 3))
         or mean_ratio >= ratio_threshold
-        or (std_ratio >= 5.0 and cur.size >= 10 and base.size >= 10)
+        or (std_ratio >= 4.0 and (n_cur >= 5 and n_base >= 5))
     )
 
     primary_score = float(ks_stat if ks_stat > 0 else (mean_ratio if np.isfinite(mean_ratio) else 999.0))
@@ -89,5 +132,5 @@ def detect_distribution_shift(
         "is_anomaly": is_anomaly,
         "score": primary_score,
         "method": "ks_distribution_test",
-        "reason": f"ks_stat={ks_stat:.3f}, mean_ratio={mean_ratio:.3f}, std_ratio={std_ratio:.2f}",
+        "reason": f"ks_stat={ks_stat:.3f}, mean_std_shift={mean_std_shift:.2f}, mean_ratio={mean_ratio:.2f}, std_ratio={std_ratio:.2f}",
     }
