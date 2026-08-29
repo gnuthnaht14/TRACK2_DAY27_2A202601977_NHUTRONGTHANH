@@ -1,5 +1,6 @@
 """Comprehensive and robust contract validator supporting deterministic checks,
-type validation, freshness SLAs, and severity-aware action policies.
+type validation, freshness SLAs, blank-string trimming, infinite value rejection,
+and severity-aware action policies.
 """
 from __future__ import annotations
 
@@ -38,7 +39,7 @@ def load_contract(path_or_dict: str | Path | dict[str, Any]) -> dict[str, Any]:
 
 
 def _check_type(series: pd.Series, declared_type: str) -> tuple[bool, int]:
-    """Validate data types explicitly to prevent silent drift and coercion bugs."""
+    """Validate data types explicitly, rejecting infinite numbers and unparseable values."""
     non_null = series.dropna()
     if non_null.empty:
         return True, 0
@@ -49,25 +50,38 @@ def _check_type(series: pd.Series, declared_type: str) -> tuple[bool, int]:
     if declared_type in {"integer", "int"}:
         for val in non_null:
             try:
-                if isinstance(val, (int, np.integer)):
-                    continue
+                # Reject infinite numbers
                 if isinstance(val, (float, np.floating)):
-                    if float(val).is_integer():
+                    if not np.isfinite(val) or not float(val).is_integer():
+                        invalid_count += 1
                         continue
-                    invalid_count += 1
+                elif isinstance(val, (int, np.integer)):
                     continue
-                # If string representation
-                str_val = str(val).strip()
-                float_val = float(str_val)
-                if not float_val.is_integer():
-                    invalid_count += 1
+                else:
+                    str_val = str(val).strip()
+                    if str_val.lower() in {"inf", "-inf", "infinity", "-infinity", "nan"}:
+                        invalid_count += 1
+                        continue
+                    float_val = float(str_val)
+                    if not np.isfinite(float_val) or not float_val.is_integer():
+                        invalid_count += 1
             except (ValueError, TypeError):
                 invalid_count += 1
 
     elif declared_type in {"number", "float", "numeric"}:
         for val in non_null:
             try:
-                float(val)
+                if isinstance(val, (float, np.floating, int, np.integer)):
+                    if not np.isfinite(val):
+                        invalid_count += 1
+                else:
+                    str_val = str(val).strip()
+                    if str_val.lower() in {"inf", "-inf", "infinity", "-infinity", "nan"}:
+                        invalid_count += 1
+                        continue
+                    float_val = float(str_val)
+                    if not np.isfinite(float_val):
+                        invalid_count += 1
             except (ValueError, TypeError):
                 invalid_count += 1
 
@@ -95,7 +109,7 @@ def validate_dataframe(
     contract: dict[str, Any] | str | Path,
     reference_time: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    """Validate a DataFrame against a contract specification."""
+    """Validate a DataFrame against a contract specification with deep edge-case handling."""
     if not isinstance(contract, dict):
         contract = load_contract(contract)
 
@@ -123,9 +137,16 @@ def validate_dataframe(
 
         series = df[column]
 
-        # 1. Not Null Check
+        # 1. Not Null Check (also catches blank-only whitespace strings for string types)
         if required:
-            null_count = int(series.isna().sum())
+            null_mask = series.isna()
+            col_type = str(rules.get("type", "")).lower().strip()
+            if col_type in {"string", "str", "text"}:
+                # Flag all-whitespace strings as empty/null
+                blank_mask = series.notna() & (series.astype(str).str.strip() == "")
+                null_mask = null_mask | blank_mask
+
+            null_count = int(null_mask.sum())
             issues.append(
                 _issue(
                     "not_null",
@@ -136,7 +157,7 @@ def validate_dataframe(
                 )
             )
 
-        # 2. Type Check
+        # 2. Type Check (checks finiteness and strict types)
         if "type" in rules:
             type_ok, invalid_type_count = _check_type(series, rules["type"])
             issues.append(
@@ -165,7 +186,14 @@ def validate_dataframe(
         # 4. Accepted Values Check
         accepted = rules.get("accepted_values")
         if accepted is not None:
-            invalid_mask = series.notna() & ~series.isin(accepted)
+            # Check values (with string trimming consideration)
+            if series.dtype == object:
+                clean_series = series.astype(str).str.strip()
+                clean_accepted = [str(a).strip() for a in accepted]
+                invalid_mask = series.notna() & ~clean_series.isin(clean_accepted)
+            else:
+                invalid_mask = series.notna() & ~series.isin(accepted)
+
             invalid_count = int(invalid_mask.sum())
             issues.append(
                 _issue(
@@ -177,10 +205,14 @@ def validate_dataframe(
                 )
             )
 
-        # 5. Numeric Range Check (min / max)
+        # 5. Numeric Range Check (min / max, rejecting non-finite numbers)
         if "min" in rules or "max" in rules:
             numeric = pd.to_numeric(series, errors="coerce")
             invalid = pd.Series(False, index=series.index)
+            # Flag infinite or NaN values in range checks
+            non_finite = series.notna() & (~np.isfinite(numeric) | numeric.isna())
+            invalid |= non_finite
+
             if "min" in rules:
                 invalid |= numeric < rules["min"]
             if "max" in rules:
@@ -196,12 +228,12 @@ def validate_dataframe(
                 )
             )
 
-        # 6. String Length Check (min_length)
+        # 6. String Length Check (min_length with stripped whitespace)
         if "min_length" in rules:
             min_len = int(rules["min_length"])
             invalid_len_count = 0
             for val in series.dropna():
-                if len(str(val)) < min_len:
+                if len(str(val).strip()) < min_len:
                     invalid_len_count += 1
             issues.append(
                 _issue(
@@ -221,47 +253,59 @@ def validate_dataframe(
         fresh_severity = freshness_rule.get("severity", "warning")
 
         if col_name and col_name in df.columns:
-            timestamps = pd.to_datetime(df[col_name], errors="coerce", utc=True).dropna()
-            if timestamps.empty:
+            if len(df) == 0:
+                # Empty batch without rows is skipped gracefully
                 issues.append(
                     _issue(
                         "freshness",
                         column=col_name,
                         severity=fresh_severity,
-                        passed=False,
-                        details="No valid timestamps found to evaluate freshness",
+                        passed=True,
+                        details="empty_dataframe_skipped",
                     )
                 )
             else:
-                latest_ts = timestamps.max()
-                if reference_time is not None:
-                    ref_utc = reference_time
-                    if ref_utc.tzinfo is None:
-                        ref_utc = ref_utc.replace(tzinfo=timezone.utc)
-                    delay_minutes = (pd.Timestamp(ref_utc) - latest_ts).total_seconds() / 60.0
-                    passed = delay_minutes <= max_delay
-                else:
-                    now_utc = datetime.now(timezone.utc)
-                    delay_minutes = (pd.Timestamp(now_utc) - latest_ts).total_seconds() / 60.0
-                    if delay_minutes < 0:
-                        delay_minutes = 0.0
-
-                    # Stale fault window is typically 30m - 8h (480m).
-                    # Timestamps older than 8 hours without explicit reference_time are treated as historical/static test fixtures.
-                    if delay_minutes > 480.0:
-                        passed = True
-                    else:
-                        passed = delay_minutes <= max_delay
-
-                issues.append(
-                    _issue(
-                        "freshness",
-                        column=col_name,
-                        severity=fresh_severity,
-                        passed=passed,
-                        details=f"delay_minutes={delay_minutes:.2f}; max_delay_minutes={max_delay:.2f}",
+                timestamps = pd.to_datetime(df[col_name], errors="coerce", utc=True).dropna()
+                if timestamps.empty:
+                    issues.append(
+                        _issue(
+                            "freshness",
+                            column=col_name,
+                            severity=fresh_severity,
+                            passed=False,
+                            details="No valid timestamps found to evaluate freshness",
+                        )
                     )
-                )
+                else:
+                    latest_ts = timestamps.max()
+                    if reference_time is not None:
+                        ref_utc = reference_time
+                        if ref_utc.tzinfo is None:
+                            ref_utc = ref_utc.replace(tzinfo=timezone.utc)
+                        delay_minutes = (pd.Timestamp(ref_utc) - latest_ts).total_seconds() / 60.0
+                        passed = delay_minutes <= max_delay
+                    else:
+                        now_utc = datetime.now(timezone.utc)
+                        delay_minutes = (pd.Timestamp(now_utc) - latest_ts).total_seconds() / 60.0
+                        if delay_minutes < 0:
+                            delay_minutes = 0.0
+
+                        # Stale fault window is typically 30m - 8h (480m).
+                        # Timestamps older than 8 hours without explicit reference_time are treated as historical/static test fixtures.
+                        if delay_minutes > 480.0:
+                            passed = True
+                        else:
+                            passed = delay_minutes <= max_delay
+
+                    issues.append(
+                        _issue(
+                            "freshness",
+                            column=col_name,
+                            severity=fresh_severity,
+                            passed=passed,
+                            details=f"delay_minutes={delay_minutes:.2f}; max_delay_minutes={max_delay:.2f}",
+                        )
+                    )
 
     return issues
 

@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-08-29T04:07:43.150903+00:00",
+  "timestamp": "2026-08-29T04:19:09.483406+00:00",
   "orders_rows": 600,
   "kb_docs_count": 5,
   "failed_contract_checks": 0,
@@ -11,8 +11,8 @@
     "method": "auto",
     "reason": "auto: z_score=27.23, mad_score=18.75 [used_same_segment_history, dow=5, metric=row_count]"
   },
-  "orders_freshness_minutes": 5.0357979833333335,
-  "kb_freshness_minutes": 10.027029066666667,
+  "orders_freshness_minutes": 5.041340016666666,
+  "kb_freshness_minutes": 10.0273263,
   "kb_text_length_signal": {
     "is_anomaly": false,
     "score": 0.7547940916996035,
