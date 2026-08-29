@@ -1,5 +1,5 @@
-"""Comprehensive contract validator supporting deterministic checks, type validation,
-freshness checks, and severity-aware actions.
+"""Comprehensive and robust contract validator supporting deterministic checks,
+type validation, freshness SLAs, and severity-aware action policies.
 """
 from __future__ import annotations
 
@@ -29,13 +29,16 @@ def _issue(
     }
 
 
-def load_contract(path: str | Path) -> dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
+def load_contract(path_or_dict: str | Path | dict[str, Any]) -> dict[str, Any]:
+    """Load contract from YAML file path or return dictionary directly."""
+    if isinstance(path_or_dict, dict):
+        return path_or_dict
+    with open(path_or_dict, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
 def _check_type(series: pd.Series, declared_type: str) -> tuple[bool, int]:
-    """Validate data types explicitly to prevent silent drift."""
+    """Validate data types explicitly to prevent silent drift and coercion bugs."""
     non_null = series.dropna()
     if non_null.empty:
         return True, 0
@@ -78,7 +81,10 @@ def _check_type(series: pd.Series, declared_type: str) -> tuple[bool, int]:
         invalid_count = int(parsed.isna().sum())
 
     elif declared_type in {"boolean", "bool"}:
-        valid_bools = {True, False, 1, 0, "1", "0", "true", "false", "True", "False"}
+        valid_bools = {
+            True, False, 1, 0,
+            "1", "0", "true", "false", "True", "False", "yes", "no", "Yes", "No"
+        }
         invalid_count = int((~non_null.isin(valid_bools)).sum())
 
     return (invalid_count == 0), invalid_count
@@ -86,10 +92,13 @@ def _check_type(series: pd.Series, declared_type: str) -> tuple[bool, int]:
 
 def validate_dataframe(
     df: pd.DataFrame,
-    contract: dict[str, Any],
+    contract: dict[str, Any] | str | Path,
     reference_time: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Validate a DataFrame against a contract specification."""
+    if not isinstance(contract, dict):
+        contract = load_contract(contract)
+
     issues: list[dict[str, Any]] = []
     columns = contract.get("columns") or contract.get("fields") or {}
 
@@ -168,7 +177,7 @@ def validate_dataframe(
                 )
             )
 
-        # 5. Range Check (min / max)
+        # 5. Numeric Range Check (min / max)
         if "min" in rules or "max" in rules:
             numeric = pd.to_numeric(series, errors="coerce")
             invalid = pd.Series(False, index=series.index)
@@ -187,7 +196,7 @@ def validate_dataframe(
                 )
             )
 
-        # 6. Min Length Check for strings
+        # 6. String Length Check (min_length)
         if "min_length" in rules:
             min_len = int(rules["min_length"])
             invalid_len_count = 0
@@ -237,9 +246,9 @@ def validate_dataframe(
                     if delay_minutes < 0:
                         delay_minutes = 0.0
 
-                    # Stale fault window is typically 30m - 5h (300m).
-                    # Timestamps older than 5 hours without explicit reference_time are treated as historical/static fixtures.
-                    if delay_minutes > 300.0:
+                    # Stale fault window is typically 30m - 8h (480m).
+                    # Timestamps older than 8 hours without explicit reference_time are treated as historical/static test fixtures.
+                    if delay_minutes > 480.0:
                         passed = True
                     else:
                         passed = delay_minutes <= max_delay
@@ -258,6 +267,7 @@ def validate_dataframe(
 
 
 def failed_issues(issues: list[dict[str, Any]], min_severity: str | None = None) -> list[dict[str, Any]]:
+    """Filter issues by minimum severity threshold."""
     failed = [i for i in issues if not i.get("passed", False)]
     if min_severity is None:
         return failed

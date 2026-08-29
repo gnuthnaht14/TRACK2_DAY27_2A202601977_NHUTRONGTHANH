@@ -11,7 +11,15 @@ from observability.anomaly import zscore_detector
 
 def approximate_token_lengths(texts: Iterable[str]) -> list[int]:
     """Token length proxy based on whitespace word counting."""
-    return [len(str(t).split()) for t in texts]
+    if not texts:
+        return []
+    out = []
+    for t in texts:
+        if t is None:
+            out.append(0)
+        else:
+            out.append(len(str(t).split()))
+    return out
 
 
 def detect_text_length_shift(
@@ -36,23 +44,41 @@ def detect_embedding_norm_shift(
     threshold: float = 3.0,
 ) -> dict[str, Any]:
     """Detect distribution drift in embedding vector norms or cosine similarities."""
-    cur = np.asarray(list(current_norms), dtype=float)
-    base = np.asarray(list(baseline_norms), dtype=float)
-
-    cur = cur[np.isfinite(cur)]
-    base = base[np.isfinite(base)]
-
-    if cur.size < 3 or base.size < 3:
+    try:
+        cur = np.asarray(list(current_norms), dtype=float).ravel()
+        base = np.asarray(list(baseline_norms), dtype=float).ravel()
+        cur = cur[np.isfinite(cur)]
+        base = base[np.isfinite(base)]
+    except Exception:
         return {
             "is_anomaly": False,
             "score": 0.0,
             "method": "embedding_norm_shift",
-            "reason": "insufficient_data",
+            "reason": "invalid_input_data",
+        }
+
+    if cur.size == 0 or base.size == 0:
+        return {
+            "is_anomaly": False,
+            "score": 0.0,
+            "method": "embedding_norm_shift",
+            "reason": "empty_input",
         }
 
     cur_mean = float(np.mean(cur))
     base_mean = float(np.mean(base))
     base_std = float(np.std(base))
+
+    # Zero-vector collapse check: if current norms drop near zero while baseline was normal
+    if cur_mean < 0.01 and base_mean > 0.5:
+        return {
+            "is_anomaly": True,
+            "score": float("inf"),
+            "method": "embedding_norm_shift",
+            "reason": f"zero_vector_collapse: current_mean={cur_mean:.4f}, baseline_mean={base_mean:.4f}",
+            "current_mean": cur_mean,
+            "baseline_mean": base_mean,
+        }
 
     if base_std == 0:
         score = float("inf") if cur_mean != base_mean else 0.0

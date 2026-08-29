@@ -14,15 +14,24 @@ def load_graph(path: str | Path) -> dict[str, list[str]]:
     return payload["dataset_lineage"] if "dataset_lineage" in payload else payload
 
 
-def get_downstream_assets(graph: dict[str, list[str]], start: str) -> list[str]:
-    """Return transitive downstream assets in BFS order, excluding start."""
+def get_downstream_assets(graph: dict[str, list[str]] | None, start: str | None) -> list[str]:
+    """Return transitive downstream assets in BFS order, excluding start.
+    
+    Robust against cycles, missing nodes, and diamond dependencies.
+    """
+    if not graph or not isinstance(graph, dict) or not start:
+        return []
+
     seen = {start}
     q: deque[str] = deque([start])
     out: list[str] = []
     while q:
         node = q.popleft()
-        for child in graph.get(node, []):
-            if child not in seen:
+        children = graph.get(node, [])
+        if not isinstance(children, list):
+            continue
+        for child in children:
+            if child and child not in seen:
                 seen.add(child)
                 out.append(child)
                 q.append(child)
@@ -30,16 +39,25 @@ def get_downstream_assets(graph: dict[str, list[str]], start: str) -> list[str]:
 
 
 def get_column_downstream(
-    column_graph: dict[str, list[str]], start_column: str
+    column_graph: dict[str, list[str]] | None, start_column: str | None
 ) -> list[str]:
-    """Return transitive downstream columns in BFS order, excluding start_column."""
+    """Return transitive downstream columns in BFS order, excluding start_column.
+    
+    Robust against cycles, missing nodes, and diamond dependencies.
+    """
+    if not column_graph or not isinstance(column_graph, dict) or not start_column:
+        return []
+
     seen = {start_column}
     q: deque[str] = deque([start_column])
     out: list[str] = []
     while q:
         node = q.popleft()
-        for child in column_graph.get(node, []):
-            if child not in seen:
+        children = column_graph.get(node, [])
+        if not isinstance(children, list):
+            continue
+        for child in children:
+            if child and child not in seen:
                 seen.add(child)
                 out.append(child)
                 q.append(child)

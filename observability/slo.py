@@ -11,28 +11,37 @@ from typing import Any
 
 def calculate_slo(target: float, bad_events: int, total_events: int) -> dict[str, Any]:
     """Calculate SLI/SLO metrics, error budget, and burn rate."""
-    if not 0 < target < 1:
-        raise ValueError("target must be between 0 and 1 (exclusive)")
-    if bad_events < 0 or total_events < 0 or bad_events > total_events:
-        raise ValueError("invalid event counts")
-    
-    allowed_bad_rate = 1.0 - target
-    if total_events == 0:
+    # Normalize percentage input (e.g. 99.5 -> 0.995)
+    t = float(target)
+    if t > 1.0:
+        t = t / 100.0
+
+    if not 0 < t < 1:
+        raise ValueError(f"target must be between 0 and 1 (exclusive), got: {target}")
+
+    bad = int(bad_events)
+    total = int(total_events)
+
+    if bad < 0 or total < 0 or bad > total:
+        raise ValueError(f"invalid event counts: bad={bad_events}, total={total_events}")
+
+    allowed_bad_rate = 1.0 - t
+    if total == 0:
         return {
-            "target": target,
+            "target": t,
             "actual_bad_rate": 0.0,
             "allowed_bad_rate": allowed_bad_rate,
             "burn_rate": 0.0,
             "remaining_error_budget_fraction": 1.0,
             "breached": False,
         }
-        
-    actual_bad_rate = bad_events / total_events
+
+    actual_bad_rate = bad / total
     burn_rate = actual_bad_rate / allowed_bad_rate
     consumed_fraction = actual_bad_rate / allowed_bad_rate
-    
+
     return {
-        "target": target,
+        "target": t,
         "actual_bad_rate": actual_bad_rate,
         "allowed_bad_rate": allowed_bad_rate,
         "burn_rate": burn_rate,
@@ -48,7 +57,7 @@ def evaluate_multiwindow_burn(
     policy: str = "google_sre",
 ) -> dict[str, Any]:
     """Evaluate multi-window burn rate to decide whether to page or warn.
-    
+
     Google SRE Multiwindow Burn Rate Rules:
     - Paging requires BOTH short-window and long-window to sustain elevated burn rates.
     - Transient spike: High short-window but low long-window -> Do NOT page (ticket/warning).

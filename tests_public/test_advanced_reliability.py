@@ -39,6 +39,19 @@ def test_type_drift_is_detected_in_contracts():
     assert any(i["check"] == "type" and i["column"] == "order_id" for i in failed)
 
 
+def test_direct_dict_contract_validation():
+    contract_dict = {
+        "columns": {
+            "order_id": {"type": "integer", "required": True, "unique": True, "severity": "critical"},
+            "amount": {"type": "number", "min": 0, "severity": "critical"},
+        }
+    }
+    df = pd.DataFrame([{"order_id": 1, "amount": -10.0}])
+    issues = validate_dataframe(df, contract_dict)
+    failed = [i for i in issues if not i["passed"]]
+    assert any(i["check"] == "range" and i["column"] == "amount" for i in failed)
+
+
 def test_freshness_violation_in_contracts():
     # 2 hours old data against a 30-minute max delay
     old_time = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
@@ -81,7 +94,6 @@ def test_mad_zero_mad_edge_case():
 
 
 def test_context_aware_auto_anomaly_detection():
-    # General history has variance, but same-segment (e.g. Saturday) is low volume
     general_history = [1000, 1050, 980, 1020, 1010]
     saturday_history = [300, 310, 295, 305, 302]
 
@@ -94,6 +106,18 @@ def test_context_aware_auto_anomaly_detection():
         context={"day_of_week": 5, "same_segment_history": saturday_history},
     )
     assert result_with_context["is_anomaly"] is False
+
+
+def test_known_event_surge_handling():
+    history = [100, 105, 98, 102, 101]
+    # Volume surge during a known flash sale event should not trigger critical anomaly
+    result = detect_metric(
+        220,
+        history,
+        method="auto",
+        context={"known_event": "flash_sale"},
+    )
+    assert result["score"] <= 6.0
 
 
 def test_ks_distribution_shift():
@@ -120,6 +144,25 @@ def test_transitive_column_lineage():
     ]
 
 
+def test_cycle_lineage_graph_safety():
+    # Graph containing cycles A -> B -> C -> A
+    cycle_graph = {
+        "A": ["B"],
+        "B": ["C"],
+        "C": ["A", "D"],
+    }
+    assets = downstream_assets(cycle_graph, "A")
+    assert "B" in assets and "C" in assets and "D" in assets
+    assert len(assets) == 3  # Visited each unique downstream node once without infinite loop
+
+
+def test_slo_percentage_normalization():
+    # Target passed as percentage 99.5 instead of 0.995
+    res = slo_status(99.5, bad_events=1, total_events=1000)
+    assert res["target"] == pytest.approx(0.995)
+    assert res["allowed_bad_rate"] == pytest.approx(0.005)
+
+
 def test_multiwindow_burn_rate_policies():
     # 1. Sustained Fast Burn -> Must PAGE
     fast_burn = multiwindow_burn(short_window_burn=15.0, long_window_burn=15.0)
@@ -142,4 +185,11 @@ def test_rag_embedding_norm_drift():
     # Collapse in vector norms
     drifted_norms = [0.1, 0.12, 0.09, 0.11]
     res = rag_embedding_shift(drifted_norms, baseline_norms)
+    assert res["is_anomaly"] is True
+
+
+def test_rag_zero_vector_collapse():
+    baseline_norms = [0.95, 1.0, 1.05, 0.98, 1.02]
+    zero_norms = [0.0001, 0.0002, 0.0000]
+    res = rag_embedding_shift(zero_norms, baseline_norms)
     assert res["is_anomaly"] is True
